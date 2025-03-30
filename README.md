@@ -21,4 +21,4 @@ Discordの音声チャンネルでの会話を自動的に録音し、MP3ファ�
 1. リポジトリをクローン
 ```bash
 git clone https://github.com/atsukitanaka0922/Mascachan.git
-cd discord-recorder
+cd Mascachan
