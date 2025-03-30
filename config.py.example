@@ -1,0 +1,8 @@
+# ボットの設定
+TOKEN = 'YOUR_BOT_TOKEN_HERE'  # ここにトークンを入力
+COMMAND_PREFIX = '!'
+
+# 録音の設定
+RECORDING_LENGTH = 600  # 10分（秒）
+SAMPLE_RATE = 48000
+CHANNELS = 2

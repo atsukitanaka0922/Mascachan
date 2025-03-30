@@ -1,0 +1,22 @@
+# 録音ファイル
+recordings/
+
+# ボットの設定（トークンを含むため）
+config.py
+
+# ログファイル
+*.log
+err.log
+
+# キャッシュファイル
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 仮想環境
+venv/
+env/
+ENV/
+
+# FFmpeg実行ファイル（もし含めている場合）
+*.exe
