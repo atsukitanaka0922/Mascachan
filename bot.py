@@ -1,3 +1,10 @@
+"""
+Discord録音ボット
+
+Discordの音声チャンネルでの会話を自動的に録音し、MP3ファイルとして保存します。
+10分ごとに録音ファイルを区切るため、長時間の録音でも管理しやすくなっています。
+"""
+
 import discord
 import asyncio
 import os
@@ -6,15 +13,10 @@ import wave
 import logging
 import subprocess
 import tempfile
-import traceback  # エラー詳細表示用
 from discord.ext import commands, tasks
 from config import TOKEN, COMMAND_PREFIX, RECORDING_LENGTH, SAMPLE_RATE, CHANNELS
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-RECORDINGS_DIR = os.path.join(SCRIPT_DIR, "recordings")
-FFMPEG_PATH = os.path.join(SCRIPT_DIR, "ffmpeg.exe")
-
-# ログの設定
+# ロガーの設定
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,10 +31,11 @@ logger = logging.getLogger("discord-recorder")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RECORDINGS_DIR = os.path.join(SCRIPT_DIR, "recordings")
 
+# FFmpegへのパスを設定（ローカルにある場合）
+FFMPEG_PATH = os.path.join(SCRIPT_DIR, "ffmpeg.exe")
+
 # ボットのインテント設定
-intents = discord.Intents.default()
-intents.message_content = True
-intents.voice_states = True  # 音声状態の変更を監視するために必要
+intents = discord.Intents.all()  # すべてのインテントを有効化
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 
 # 録音セッション情報を保持する辞書
@@ -41,6 +44,7 @@ recording_sessions = {}
 @bot.event
 async def on_ready():
     logger.info(f'{bot.user} としてログインしました')
+    logger.info(f'インテント設定: {bot.intents}')
     check_voice_connections.start()
     logger.info('監視ループを開始しました')
     print('------')
@@ -139,6 +143,7 @@ async def record(ctx):
                        f"保存先: {session_dir}")
         
         logger.info(f"{ctx.guild.name}の{voice_channel.name}で録音を開始しました")
+        logger.info(f"チャンネルユーザー数: {len(voice_channel.members)}")
         
         # 録音ループを開始
         asyncio.create_task(recording_loop(ctx))
@@ -166,59 +171,46 @@ async def recording_loop(ctx):
             sink = discord.sinks.WaveSink()
             
             try:
-                logger.info(f"{ctx.guild.name}: セグメント{segment}の録音を開始します")
                 session["voice_client"].start_recording(
                     sink,
                     finished_callback,
                     ctx
                 )
                 
-                # 録音時間の計測 - 開始時間を記録
-                start_time = datetime.datetime.now()
-                logger.info(f"録音開始時間: {start_time}")
+                # Discord接続の状態を確認
+                logger.info(f"音声接続状態: 接続={session['voice_client'].is_connected()}, 再生中={session['voice_client'].is_playing()}")
+                logger.info(f"音声チャンネルのユーザー数: {len(session['voice_client'].channel.members)}")
+                
+                # 指定時間待機
+                logger.info(f"{ctx.guild.name}: セグメント{segment}の録音を開始しました")
                 
                 # 指定時間待機しながら、一定間隔で接続状態を確認
-                actual_wait_time = 0
-                check_interval = 10  # 10秒ごとにチェック
-                
-                while actual_wait_time < RECORDING_LENGTH:
-                    # 録音が中断されたかチェック
+                for _ in range(RECORDING_LENGTH // 10):
                     if not (guild_id in recording_sessions and 
                             recording_sessions[guild_id]["running"] and 
                             recording_sessions[guild_id]["voice_client"].is_connected()):
                         logger.warning(f"{ctx.guild.name}: 録音が中断されました")
                         break
-                        
-                    await asyncio.sleep(check_interval)
-                    actual_wait_time += check_interval
-                    logger.info(f"録音経過時間: {actual_wait_time}秒")
-                
-                # 録音終了時間を記録
-                end_time = datetime.datetime.now()
-                duration = (end_time - start_time).total_seconds()
-                logger.info(f"録音終了時間: {end_time}, 合計録音時間: {duration}秒")
+                    await asyncio.sleep(10)
                 
                 if not (guild_id in recording_sessions and recording_sessions[guild_id]["running"]):
                     break
                     
                 # 録音を停止して保存
                 if guild_id in recording_sessions and recording_sessions[guild_id]["voice_client"].is_connected():
-                    logger.info(f"録音停止処理を開始: セグメント {segment}")
                     session["voice_client"].stop_recording()
-                    await save_recording_as_mp3(sink, filename)
+                    success = await save_recording_as_mp3(sink, filename)
                     
-                    # 保存後のファイルサイズを確認
-                    if os.path.exists(filename):
-                        file_size = os.path.getsize(filename)
-                        logger.info(f"保存されたファイル {filename} のサイズ: {file_size} バイト")
-                    
-                    session["segment"] += 1
-                    await ctx.send(f"セグメント {segment} を保存しました。録音時間: {int(duration)}秒")
-                    logger.info(f"{ctx.guild.name}: セグメント{segment}を保存しました")
+                    if success:
+                        session["segment"] += 1
+                        await ctx.send(f"セグメント {segment} を保存しました。\n保存先: {filename}")
+                        logger.info(f"{ctx.guild.name}: セグメント{segment}を保存しました")
+                    else:
+                        await ctx.send(f"セグメント {segment} の保存に失敗しました。ログを確認してください。")
+                        logger.error(f"{ctx.guild.name}: セグメント{segment}の保存に失敗")
             
             except Exception as e:
                 logger.error(f"録音ループ中にエラーが発生しました: {e}")
-                logger.error(f"エラーの詳細: {traceback.format_exc()}")
                 if guild_id in recording_sessions:
                     try:
                         recording_sessions[guild_id]["voice_client"].stop_recording()
@@ -229,7 +221,6 @@ async def recording_loop(ctx):
     
     except Exception as e:
         logger.error(f"録音ループ全体でエラーが発生しました: {e}")
-        logger.error(f"エラーの詳細: {traceback.format_exc()}")
         await ctx.send(f"録音が中断されました: {e}")
 
 async def finished_callback(sink, ctx):
@@ -241,73 +232,83 @@ async def finished_callback(sink, ctx):
 async def save_recording_as_mp3(sink, filename):
     """録音データをMP3ファイルとして保存する"""
     try:
-        # 一時ディレクトリを使用して安全に処理
+        # 音声データの確認と詳細ログ
+        logger.info(f"録音ユーザー数: {len(sink.audio_data)}")
+        total_size = 0
+        
+        for user_id, audio in sink.audio_data.items():
+            audio.file.seek(0, os.SEEK_END)
+            size = audio.file.tell()
+            audio.file.seek(0)
+            total_size += size
+            logger.info(f"ユーザーID {user_id} の録音サイズ: {size} バイト")
+        
+        logger.info(f"合計録音サイズ: {total_size} バイト")
+        
+        if not sink.audio_data:
+            logger.warning("録音データが空です！")
+            return False
+            
+        # 録音サイズが小さすぎる場合は処理しない
+        if total_size < 1000:  # 1KB未満
+            logger.warning(f"録音サイズが小さすぎます ({total_size} バイト)。処理をスキップします。")
+            return False
+        
+        # デバッグディレクトリ
+        debug_dir = os.path.join(RECORDINGS_DIR, "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # 一時WAVファイル（デバッグ用に保存）
+        debug_wav = os.path.join(debug_dir, f"debug_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav")
+        
+        # 一時ディレクトリを使用
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_wav = os.path.join(temp_dir, "temp_recording.wav")
             
-            # 一時的にWAVファイルを作成
+            # WAVファイルの準備
             logger.info(f"一時WAVファイルを作成: {temp_wav}")
-            combined_audio = bytearray()
             
-            # 音声データの確認
-            if not sink.audio_data:
-                logger.warning("録音データが空です！")
-                return
-                
-            # データサイズのログ出力
-            total_size = 0
-            user_count = 0
-            
-            for user_id, audio in sink.audio_data.items():
-                user_count += 1
-                audio.file.seek(0, os.SEEK_END)
-                size = audio.file.tell()
-                audio.file.seek(0)
-                total_size += size
-                logger.info(f"ユーザーID {user_id} の録音サイズ: {size} バイト")
-                
-                # 音声データの詳細を確認
-                first_bytes = audio.file.read(min(100, size))
-                audio.file.seek(0)
-                logger.info(f"最初の数バイト: {first_bytes}")
-                
-                # データを追加
-                audio_data = audio.file.read()
-                combined_audio.extend(audio_data)
-                audio.file.seek(0)
-            
-            logger.info(f"合計ユーザー数: {user_count}, 合計録音サイズ: {total_size} バイト")
-            
-            # WAVヘッダー情報を確認
-            if total_size < 44:  # WAVヘッダーの最小サイズ
-                logger.error("データサイズが小さすぎます（WAVヘッダーより小さい）")
-                if total_size == 0:
-                    logger.error("録音データが空です。マイクが正しく検出されていない可能性があります")
-                    await ctx.send("録音データが空です。マイクが正しく検出されていない可能性があります")
-                return
-            
-            # WAVとして一時保存
+            # WAVファイルを作成
             with wave.open(temp_wav, 'wb') as wav_file:
                 wav_file.setnchannels(CHANNELS)
                 wav_file.setsampwidth(2)  # 16-bit PCM
                 wav_file.setframerate(SAMPLE_RATE)
+                
+                # すべてのユーザーの音声データを処理
+                combined_audio = bytearray()
+                for user_id, audio in sink.audio_data.items():
+                    combined_audio.extend(audio.file.read())
+                    audio.file.seek(0)  # ファイルポインタをリセット
+                
                 wav_file.writeframes(combined_audio)
             
-            # 保存されたWAVファイルのサイズを確認
-            wav_size = os.path.getsize(temp_wav)
-            logger.info(f"WAVファイルサイズ: {wav_size} バイト")
+            # デバッグ用にもWAVファイルを保存
+            with wave.open(debug_wav, 'wb') as wav_file:
+                wav_file.setnchannels(CHANNELS)
+                wav_file.setsampwidth(2)  # 16-bit PCM
+                wav_file.setframerate(SAMPLE_RATE)
+                
+                # 全ユーザーの音声を再度読み込み
+                combined_audio = bytearray()
+                for user_id, audio in sink.audio_data.items():
+                    combined_audio.extend(audio.file.read())
+                    audio.file.seek(0)  # ファイルポインタをリセット
+                
+                wav_file.writeframes(combined_audio)
             
-            # WAVファイルが極端に小さければ警告
-            if wav_size < 1000:  # 1KB未満は異常に小さい
-                logger.warning(f"WAVファイルが極端に小さいです: {wav_size} バイト")
+            logger.info(f"デバッグ用WAVファイルを保存: {debug_wav}")
             
-            # FFmpegでMP3に変換
-            logger.info(f"MP3に変換: {filename}")
-            
+            # ファイルが正常に作成されたか確認
+            if not os.path.exists(temp_wav) or os.path.getsize(temp_wav) < 1000:
+                logger.error(f"WAVファイルの作成に失敗または小さすぎます: {temp_wav}")
+                return False
+                
             # FFmpegコマンドの準備
-            ffmpeg_command = FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else 'ffmpeg'
+            # ローカルにあればそのパスを使用、なければシステムのffmpegを使用
+            ffmpeg_exec = FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else 'ffmpeg'
+            
             ffmpeg_cmd = [
-                ffmpeg_command, 
+                ffmpeg_exec, 
                 '-i', temp_wav, 
                 '-codec:a', 'libmp3lame', 
                 '-qscale:a', '2',  # 品質設定 (0-9, 0が最高品質)
@@ -315,33 +316,43 @@ async def save_recording_as_mp3(sink, filename):
                 filename
             ]
             
-            # FFmpegの実行
-            process = subprocess.run(
-                ffmpeg_cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE
-            )
+            logger.info(f"実行するFFmpegコマンド: {' '.join(ffmpeg_cmd)}")
             
-            # 結果の確認
-            if process.returncode != 0:
-                logger.error(f"FFmpeg変換エラー: {process.stderr.decode()}")
-                raise Exception(f"MP3変換に失敗しました: {process.stderr.decode()}")
+            try:
+                # FFmpegを実行して詳細なエラー出力を取得
+                process = subprocess.run(
+                    ffmpeg_cmd, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE,
+                    check=True  # エラー時に例外を発生させる
+                )
+                logger.info("FFmpeg変換成功")
+            except subprocess.CalledProcessError as e:
+                error_output = e.stderr.decode() if e.stderr else "不明なエラー"
+                logger.error(f"FFmpeg変換エラー: {error_output}")
+                
+                # 失敗した場合はデバッグ用WAVファイルをMP3の代わりに使用
+                import shutil
+                mp3_dir = os.path.dirname(filename)
+                wav_filename = os.path.join(mp3_dir, os.path.basename(filename).replace('.mp3', '.wav'))
+                shutil.copy(debug_wav, wav_filename)
+                logger.info(f"MP3変換に失敗したため、WAVファイルを保存: {wav_filename}")
+                return True
             
             # ファイル確認
             if os.path.exists(filename):
                 file_size = os.path.getsize(filename)
                 logger.info(f"MP3ファイル {filename} を保存しました。サイズ: {file_size} バイト")
-                
-                # 極端に小さいMP3ファイルの場合は警告
-                if file_size < 500:  # 500バイト未満は異常に小さい
-                    logger.warning(f"MP3ファイルが極端に小さいです: {file_size} バイト")
+                return True
             else:
                 logger.error(f"MP3ファイル {filename} が作成されませんでした")
+                return False
         
     except Exception as e:
         logger.error(f"録音保存・MP3変換中にエラーが発生しました: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        return False
 
 @bot.command(name='stop')
 async def stop_recording(ctx):
@@ -364,8 +375,11 @@ async def stop_recording(ctx):
             # 最後のセグメントも保存
             sink = session["voice_client"].sink
             if sink:
-                await save_recording_as_mp3(sink, last_filename)
-                await ctx.send(f"最終セグメント {last_segment} を保存しました。")
+                success = await save_recording_as_mp3(sink, last_filename)
+                if success:
+                    await ctx.send(f"最終セグメント {last_segment} を保存しました。\n保存先: {last_filename}")
+                else:
+                    await ctx.send(f"最終セグメントの保存に失敗しました。ログを確認してください。")
         except Exception as e:
             logger.error(f"録音停止中にエラーが発生しました: {e}")
         
@@ -395,10 +409,15 @@ async def status(ctx):
             segment = session["segment"]
             session_dir = session["session_dir"]
             
+            # 接続中のユーザー情報を取得
+            members = voice_channel.members
+            member_names = [member.display_name for member in members if not member.bot]
+            
             await ctx.send(f"現在の録音状況:\n"
                           f"チャンネル: {voice_channel.name}\n"
                           f"現在のセグメント: {segment}\n"
-                          f"保存先: {session_dir}")
+                          f"保存先: {session_dir}\n"
+                          f"参加者: {', '.join(member_names)}")
         else:
             await ctx.send("現在録音していません。")
     except Exception as e:
@@ -416,6 +435,11 @@ async def test_record(ctx):
         voice_channel = ctx.author.voice.channel
         await ctx.send(f"{voice_channel.name} でテスト録音を開始します（30秒）")
         
+        # チャンネルのメンバー確認
+        members = voice_channel.members
+        member_names = [member.display_name for member in members if not member.bot]
+        await ctx.send(f"録音対象ユーザー: {', '.join(member_names)}")
+        
         # テスト用ディレクトリ
         test_dir = os.path.join(RECORDINGS_DIR, "test")
         os.makedirs(test_dir, exist_ok=True)
@@ -431,13 +455,29 @@ async def test_record(ctx):
         
         # 録音停止と保存
         voice_client.stop_recording()
-        await save_recording_as_mp3(sink, test_file)
+        success = await save_recording_as_mp3(sink, test_file)
         await voice_client.disconnect()
         
         # 結果確認
-        if os.path.exists(test_file):
+        if success and os.path.exists(test_file):
             size = os.path.getsize(test_file)
             await ctx.send(f"テスト録音完了！ファイルサイズ: {size} バイト\n保存先: {test_file}")
+            
+            # 録音ユーザー数の報告
+            if sink.audio_data:
+                user_count = len(sink.audio_data)
+                await ctx.send(f"録音されたユーザー数: {user_count}")
+                
+                # 各ユーザーのデータサイズを報告
+                for user_id, audio in sink.audio_data.items():
+                    audio.file.seek(0, os.SEEK_END)
+                    size = audio.file.tell()
+                    audio.file.seek(0)
+                    user = ctx.guild.get_member(int(user_id))
+                    user_name = user.display_name if user else f"不明なユーザー({user_id})"
+                    await ctx.send(f"- {user_name}: {size} バイト")
+            else:
+                await ctx.send("音声データが取得できませんでした。音声が出ていることを確認してください。")
         else:
             await ctx.send("テスト録音に失敗しました。ログを確認してください。")
         
@@ -453,7 +493,8 @@ if __name__ == "__main__":
     
     # FFmpegが利用可能か確認
     try:
-        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ffmpeg_command = FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else 'ffmpeg'
+        subprocess.run([ffmpeg_command, '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         logger.info("FFmpegが利用可能です")
     except Exception as e:
         logger.warning(f"FFmpegが見つかりません。MP3変換ができない可能性があります: {e}")
